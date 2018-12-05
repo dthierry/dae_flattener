@@ -5,11 +5,12 @@ from __future__ import division
 from pyomo.environ import *
 from pyomo.core.expr import current as EXPR
 #: I had to use pyomo from github because expr didn't exist in pip
+#: also PyUtillib
 
-from pyomo.core.kernel.numvalue import NumericConstant
-from pyomo.core.kernel.numvalue import value
-from pyomo.opt import SolverFactory
+#: ToDo: indexed params
 
+from pyomo.core.expr.numvalue import NumericConstant
+from pyomo.core.expr.numvalue import value
 
 __author__ = 'David Thierry @2018'
 
@@ -39,8 +40,6 @@ class Flattener(object):
             return namel
         else:
             namel = self._navigate_structure(cpb, s_l, time_set)
-            if isinstance(comp, pyomo.core.base.var._GeneralVarData):
-                pass
             if isinstance(comp, pyomo.core.base.var._GeneralVarData):
                 namel.append(cpc.local_name)
                 if cpc.is_indexed():  #: if the parent component is indexed I want the current index.
@@ -76,10 +75,12 @@ class Flattener(object):
         :return:
         """
         if not isinstance(time_set, pyomo.core.base.sets.Set):
-            raise TypeError('wrong type')
+            raise TypeError('the time_set is not a Set')
         cpc = comp.parent_component()
         cpb = cpc.parent_block()
-        if cpb is not None:
+        if cpb is not None:  #: at the root
+            return None
+        else:
             if cpc.is_indexed():  #: if the parent component is indexed I want the current index.
                 idx0 = comp.index()
                 if cpc.index_set().dimen > 1:  #: Multi-set
@@ -93,8 +94,6 @@ class Flattener(object):
                     if cpc.index_set() is time_set:
                         return idx0
             return self._current_time_index(cpb, time_set)  #: we didn't find it here go up one level
-        else:  #: root node
-            return None
 
     def _assess_time_set(self, var_o, time_set):
         # type: (pyomo.core.base.var.Var, pyomo.core.base.sets.Set) -> None
@@ -122,31 +121,7 @@ class Flattener(object):
     def _replacement_alg(self):
         n = ConcreteModel()  #: create a new model
         count = 0
-        var_dict = dict()
-        for i in self.o_mod.component_data_objects(Var):
-            try:
-                c_v = value(i)
-            except ValueError:
-                c_v = 1e-07
-            n.add_component("x" + str(count), Var(initialize=c_v))
-            n_v = getattr(n, "x" + str(count))
-            if i.is_fixed():
-                n_v.fix()
-            var_dict[id(i)] = n_v
-            count += 1
-        count = 0
-        for i in self.o_mod.component_data_objects(Param):
-            # try:
-            c_v = value(i)
-            # except ValueError:
-            #     c_v = 1e-07
-            n.add_component("p" + str(count), Param(initialize=c_v))
-            n_v = getattr(n, "p" + str(count))
-            # n_v = getattr(n, "x" + str(1))
-            var_dict[id(i)] = n_v
-            count += 1
-        count = 0
-        visitor = ReplacementVisitor(var_dict, self.state_dict, self.idx_fun)
+        visitor = ReplacementVisitor(self.state_dict, self.idx_fun)
         for i in self.o_mod.component_data_objects(Constraint):
             o_e = i.expr
             n_e = visitor.dfs_postorder_stack(o_e)
@@ -209,10 +184,9 @@ class Flattener(object):
 
 
 class ReplacementVisitor(EXPR.ExpressionReplacementVisitor):
-    def __init__(self, s_dict, local_time_set, idxfun):
+    def __init__(self, s_dict, idxfun):
         super(ReplacementVisitor, self).__init__()
         self.d = s_dict
-        self.lts = local_time_set
         self.idxf = idxfun
 
     def visiting_potential_leaf(self, node):
