@@ -22,8 +22,6 @@ class Flattener(object):
         self.n_mod = ConcreteModel()
         self.n_mod.time = Set(initialize=self.o_time_set.value)
         self.n_mod.name = "FlatEarth_" + str(hash(mod))
-
-
         self.state_dict = dict()
         self.flat_dict = dict()
         self.n_not_indexed_vars = 0
@@ -189,9 +187,9 @@ class Flattener(object):
             print('not indexed')
 
     def _replacement_alg(self):
-        n = ConcreteModel()  #: create a new model
+        n = self.n_mod
         count = 0
-        visitor = ReplacementVisitor(self.state_dict, self.idx_fun)
+        visitor = ReplacementVisitor(self.rev_flat_dict, self.idx_fun)
         for i in self.o_mod.component_data_objects(Constraint):
             o_e = i.expr
             n_e = visitor.dfs_postorder_stack(o_e)
@@ -217,11 +215,11 @@ class Flattener(object):
             d[time] = i  #: pyomo var
 
     def _create_variables(self):
+        self.rev_flat_dict = dict()
         n = self.n_mod
         j = 0
         for i in self.state_dict.keys():
             d = self.state_dict[i]
-
             if not isinstance(d, dict):
                 n.add_component('x' + str(j), Var())
                 entry = d
@@ -229,10 +227,13 @@ class Flattener(object):
                 nvar.setlb(entry.lb)
                 nvar.setub(entry.ub)
                 nvar.set_value(value(entry))
+                if entry.is_fixed():
+                    nvar.fix()
                 nvar.doc = entry.name
                 self.flat_dict['x' + str(j), -1] = entry  #: flat to var dict
                 j += 1
                 self.n_not_indexed_vars += 1
+                self.rev_flat_dict[i, -1] = nvar
                 continue
             n.add_component('x' + str(j), Var(n.time))
             nvar = getattr(n, 'x' + str(j))
@@ -242,14 +243,17 @@ class Flattener(object):
                 nvar[t].setlb(entry.lb)
                 nvar[t].setub(entry.ub)
                 nvar[t].set_value(value(entry))
+                if entry.is_fixed():
+                    nvar[t].fix()
                 self.flat_dict['x' + str(j), t] = entry  #: flat to var dict
+                self.rev_flat_dict[i, t] = nvar[t]
             j += 1
         print("[[FLATH_EARTH]] Created model with {} variables out of which {} are not indexed.".format(j, self.n_not_indexed_vars))
 
     def idx_fun(self, comp):
         sl = []
         lo = []
-        lo = self._navigate_structure(comp, sl, self.o_time_set)
+        lo = self._navigate_structure2(comp, sl, self.o_time_set)
         s0 = str(sl)
         s1 = str(lo)
         time = self._current_time_index(comp, self.o_time_set)
@@ -278,11 +282,11 @@ class ReplacementVisitor(EXPR.ExpressionReplacementVisitor):
         if node.is_variable_type():
             s0, s1, time = self.idxf(node)
             if time is None:
-                d = self.d[s0, s1]
+                d = self.d[(s0, s1), -1]
                 return True, d
             else:
-                d = self.d[s0, s1]
-                return True, d[time]
+                d = self.d[(s0, s1), time]
+                return True, d
 
         if node.is_parameter_type():  #: gotta fix that
             n_val = value(node)
