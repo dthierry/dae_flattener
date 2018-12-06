@@ -12,12 +12,19 @@ __author__ = 'David Thierry @2018'
 
 def main():
     m = gen_mod_tank()
-    print(type(m))
-
     fl = Flattener(m, m.fs_obj.time)
+
+    print(len(m.fs_obj.time))
     fl._classification_dict()
-    for i in fl.state_dict.keys():
-        print(fl.state_dict[i], type(fl.state_dict[i]))
+    fl._create_variables()
+    fl.n_mod.display()
+    # with open('myfile.txt', 'w') as f:
+    #     for i in fl.state_dict.keys():
+    #         f.write(str(len(fl.state_dict[i])) + '\t' + str(type(fl.state_dict[i])) + '\t')
+    #         for k in i:
+    #             f.write(str(k))
+    #             f.write('\t')
+    #         f.write('\n')
 
 
 if __name__ == '__main__':
