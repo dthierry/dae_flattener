@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+from __future__ import division
+from __future__ import print_function
+
+__author__ = 'David Thierry @2018'
 
 ##############################################################################
 # Institute for the Design of Advanced Energy Systems Process Systems
@@ -7,44 +11,40 @@
 # Lawrence Berkeley National Laboratory,  National Technology & Engineering
 # Solutions of Sandia, LLC, Carnegie Mellon University, West Virginia
 # University Research Corporation, et al. All rights reserved.
-# 
+#
 # Please see the files COPYRIGHT.txt and LICENSE.txt for full copyright and
 # license information, respectively. Both files are also available online
 # at the URL "https://github.com/IDAES/idaes".
 ##############################################################################
+
 """
 Demonstration and test flowsheet for a dynamic flowsheet.
 
 """
-from __future__ import division
-from __future__ import print_function
+
+# Import Pyomo libraries
+from pyomo.environ import ConcreteModel, Constraint, SolverFactory, \
+    TransformationFactory, Var, Param, Expression, Reals, Set, PositiveReals
+
+from pyomo.core.expr.numvalue import value
+from pyomo.core.expr.current import exp, log
 
 # Import IDAES core
-from idaes.core import FlowsheetBlockData
-from idaes.core import declare_process_block_class, PropertyBlockBase, \
+from idaes.core import FlowsheetBlock, Stream
+
+from idaes.core import declare_process_block_class, ProcessBlock, \
     PropertyBlockDataBase, PropertyParameterBase
 from idaes.core.util.misc import add_object_ref, solve_indexed_blocks
+
 # Import Unit Model Modules
-from idaes.models.cstr import CSTR
-from pyomo.core.expr.current import exp, log
-# Import Pyomo libraries
-# from pyomo.environ import ConcreteModel, SolverFactory, \
-#                            TransformationFactory, Var
-from pyomo.environ import *
-from pyomo.environ import Constraint, Expression, Param, \
-    PositiveReals, Reals, Set, value, Var
+from idaes.models import CSTR, Mixer
+import logging
 
-# Import Python libraries
-# Import Property Modules
-
-__author__ = "Andrew Lee"
-
-# Set up logger
-logger = logging.getLogger('idaes.flowsheet')
+logger = logging.getLogger('idaes.unit_model.properties')
 
 
 @declare_process_block_class("PropertyParameterBlock")
-class PropertyParameterData(PropertyParameterBase):
+class _PropertyParameterBlock(PropertyParameterBase):
     """
     Property Parameter Block Class
 
@@ -57,7 +57,7 @@ class PropertyParameterData(PropertyParameterBase):
         '''
         Callable method for Block construction.
         '''
-        super(PropertyParameterData, self).build()
+        super(_PropertyParameterBlock, self).build()
 
         self._make_params()
 
@@ -74,13 +74,6 @@ class PropertyParameterData(PropertyParameterBase):
 
         # Reaction indices - a list of identifiers for each reaction
         self.rate_reaction_idx = Set(initialize=[1, 2, 3])
-
-        # Mixture heat capacity
-        self.cp_mol = Param(
-            within=PositiveReals,
-            mutable=True,
-            default=7000,  # J/mol.K (arbitrary number for testing)
-            doc="Mixture heat capacity [J/mol.K]")
 
         # Stoichiometric coefficients
         '''Stoichiometric coefficient for each component in each reaction'''
@@ -103,6 +96,13 @@ class PropertyParameterData(PropertyParameterBase):
             (3, 'Liq', 'd'): 0,
             (3, 'Liq', 'e'): 0,
             (3, 'Liq', 'f'): 1}
+
+        # Mixture heat capacity
+        self.cp_mol = Param(
+            within=PositiveReals,
+            mutable=True,
+            default=75.4,
+            doc="Mixture heat capacity [J/mol.K]")
 
         # Gas constant
         self.gas_const = Param(within=PositiveReals,
@@ -145,13 +145,13 @@ class PropertyParameterData(PropertyParameterBase):
                 'holdup': 'mol'}
 
 
-class _PropertyBlock(PropertyBlockBase):
+class _PropertyBlock(ProcessBlock):
     """
     This Class contains methods which should be applied to Property Blocks as a
     whole, rather than individual elements of indexed Property Blocks.
     """
 
-    def initialize(blk, flow_mol_comp=None, pressure=None, enth_mol=None,
+    def initialize(blk, flow_mol_comp=None, pressure=None, temperature=None,
                    hold_state=False, outlvl=0,
                    solver='ipopt', optarg={'tol': 1e-8}):
         '''
@@ -161,7 +161,8 @@ class _PropertyBlock(PropertyBlockBase):
             flow_mol_comp : value at which to initialize component flows
                              (default=None)
             pressure : value at which to initialize pressure (default=None)
-            enth_mol : value at which to initialize enthalpy (default=None)
+            temperature : value at which to initialize temperature
+                            (default=None)
             outlvl : sets output level of initialisation routine
 
                      * 0 = no output (default)
@@ -189,7 +190,7 @@ class _PropertyBlock(PropertyBlockBase):
         # Fix state variables if not already fixed
         Fcflag = {}
         Pflag = {}
-        Hflag = {}
+        Tflag = {}
 
         for k in blk.keys():
             for j in blk[k].component_list:
@@ -211,14 +212,14 @@ class _PropertyBlock(PropertyBlockBase):
                 else:
                     blk[k].pressure.fix(pressure)
 
-            if blk[k].enth_mol.fixed is True:
-                Hflag[k] = True
+            if blk[k].temperature.fixed is True:
+                Tflag[k] = True
             else:
-                Hflag[k] = False
-                if enth_mol is None:
-                    blk[k].enth_mol.fix(-740.0)
+                Tflag[k] = False
+                if temperature is None:
+                    blk[k].temperature.fix(303.15)
                 else:
-                    blk[k].enth_mol.fix(enth_mol)
+                    blk[k].temperature.fix(temperature)
 
         # Set solver options
         if outlvl > 1:
@@ -237,17 +238,13 @@ class _PropertyBlock(PropertyBlockBase):
                                        sum(value(blk[k].flow_mol_comp[i])
                                            for i in blk[k].component_list))
 
-            blk[k].temperature = (value(blk[k].temperature_ref) +
-                                  (value(blk[k].enth_mol) +
-                                   value(blk[k].flow_mol_comp['d']) *
-                                   value(blk[k].dh_rxn_mol[1]) +
-                                   0.5 * value(blk[k].flow_mol_comp['e']) *
-                                   value(blk[k].dh_rxn_mol[2]) +
-                                   value(blk[k].flow_mol_comp['f']) *
-                                   value(blk[k].dh_rxn_mol[3])) /
-                                  (value(blk[k].cp_mol) *
-                                   sum(value(blk[k].flow_mol_comp[i])
-                                       for i in blk[k].component_list)))
+            blk[k].enth_mol == value(
+                blk[k].cp_mol *
+                (blk[k].temperature - blk[k].temperature_ref) -
+                blk[k].mole_frac['d'] * blk[k].dh_rxn_mol[1] -
+                0.5 * blk[k].mole_frac['e'] *
+                blk[k].dh_rxn_mol[2] -
+                blk[k].mole_frac['f'] * blk[k].dh_rxn_mol[3])
 
             if hasattr(blk, "eq_reaction_rate") is True:
                 for i in blk[k].rate_reaction_idx:
@@ -304,7 +301,7 @@ class _PropertyBlock(PropertyBlockBase):
 
         # ---------------------------------------------------------------------
         # If input block, return flags, else release state
-        flags = {"Fcflag": Fcflag, "Pflag": Pflag, "Hflag": Hflag}
+        flags = {"Fcflag": Fcflag, "Pflag": Pflag, "Tflag": Tflag}
 
         if outlvl > 0:
             if outlvl > 0:
@@ -333,8 +330,8 @@ class _PropertyBlock(PropertyBlockBase):
                     blk[k].flow_mol_comp[j].unfix()
             if flags['Pflag'][k] is False:
                 blk[k].pressure.unfix()
-            if flags['Hflag'][k] is False:
-                blk[k].enth_mol.unfix()
+            if flags['Tflag'][k] is False:
+                blk[k].temperature.unfix()
 
         if outlvl > 0:
             if outlvl > 0:
@@ -453,20 +450,19 @@ class PropertyBlockData(PropertyBlockDataBase):
             doc="Mole fraction calculation",
             rule=mole_fraction_calculation)
 
-        # Mixture enthalpy flow
+        # Mixture enthalpy
         ''' The mixture enthalpy is assumed to be equal to that of pure
             water in the liquid state, with a constant heat capacity'''
         self.enth_mol_correlation = Constraint(
-            expr=self.enth_mol == self.cp_mol() *
-                 (self.temperature - self.temperature_ref()) -
+            expr=self.enth_mol == self.cp_mol *
+                 (self.temperature - self.temperature_ref) -
                  self.mole_frac['d'] * self.dh_rxn_mol[1] -
                  0.5 * self.mole_frac['e'] * self.dh_rxn_mol[2] -
                  self.mole_frac['f'] * self.dh_rxn_mol[3])
 
     def _dens_mol_phase(self):
         # Molar density
-        self.dens_mol_phase = Var(self.phase_list,
-                                  doc="Molar density [mol/m^3]")
+        self.dens_mol_phase = Var(self.phase_list, doc="Molar density")
 
         def dens_mol_phase_correlation(b, p):
             return b.dens_mol_phase[p] == 55555.0
@@ -475,18 +471,6 @@ class PropertyBlockData(PropertyBlockDataBase):
             self.phase_list,
             doc="Molar density correlation",
             rule=dens_mol_phase_correlation)
-
-    def _flow_vol(self):
-        # Volumetric flowrate
-        self.flow_vol = Var(doc="Total volumetric flowrate of material "
-                                "[m^3/s]")
-
-        def flow_vol_correlation(b):
-            return b.flow_vol * b.dens_mol_phase['Liq'] == b.flow_mol
-
-        self.flow_vol_correlation = Constraint(
-            doc="Volumetric flowrate correlation",
-            rule=flow_vol_correlation)
 
     def _dh_rxn_mol(self):
         # Heat of reaction
@@ -497,11 +481,11 @@ class PropertyBlockData(PropertyBlockDataBase):
 
         def dh_rxn_mol_constraint(b, i):
             if i == 1:
-                return b.dh_rxn_mol[i] == 60000
+                return b.dh_rxn_mol[i] == 18000
             elif i == 2:
-                return b.dh_rxn_mol[i] == 50000
+                return b.dh_rxn_mol[i] == 15000
             else:
-                return b.dh_rxn_mol[i] == 80000
+                return b.dh_rxn_mol[i] == 24000
 
         self.dh_rxn_mol_constraint = Constraint(
             self.rate_reaction_idx,
@@ -557,15 +541,15 @@ class PropertyBlockData(PropertyBlockDataBase):
         def arrhenius_expression(b, i):
             if i == 1:
                 return b.k_rxn_for[i] == (17.7 * exp(-12000 /
-                                                     (b.gas_const() *
+                                                     (b.gas_const *
                                                       b.temperature)))
             elif i == 2:
                 return b.k_rxn_for[i] == (1.49 * exp(-7000 /
-                                                     (b.gas_const() *
+                                                     (b.gas_const *
                                                       b.temperature)))
             else:
                 return b.k_rxn_for[i] == (26.5 * exp(-13000 /
-                                                     (b.gas_const() *
+                                                     (b.gas_const *
                                                       b.temperature)))
 
         try:
@@ -587,20 +571,20 @@ class PropertyBlockData(PropertyBlockDataBase):
 
         # Reverse reaction rates coefficients in terms of forward
         # coefficients and equilibrium coefficient
-        def rule_rate_const_rev(b, i):
+        def rule_k_rxn_rev(b, i):
             return b.k_rxn_for[i] == (b.k_rxn_back[i] *
                                       b.k_eq[i])
 
         try:
             # Try to build constraint
-            self.rate_const_relationship = Constraint(
+            self.k_rxn_relationship = Constraint(
                 self.rate_reaction_idx,
                 doc="Relationship between forward and reverse rate constants",
-                rule=rule_rate_const_rev)
+                rule=rule_k_rxn_rev)
         except AttributeError:
             # If constraint fails, clean up so that DAE can try again later
             self.del_component(self.k_rxn_back)
-            self.del_component(self.rate_const_relationship)
+            self.del_component(self.k_rxn_relationship)
             raise
 
     def _k_eq(self):
@@ -614,15 +598,15 @@ class PropertyBlockData(PropertyBlockDataBase):
         def vant_hoff(b, i):
             if i == 1:
                 return log(b.k_eq[i]) - log(20) == (
-                        -(b.dh_rxn_mol[i] / b.gas_const()) *
+                        -(b.dh_rxn_mol[i] / b.gas_const) *
                         (b.temperature ** -1 - 1 / 298.15))
             elif i == 2:
                 return log(b.k_eq[i]) - log(5) == (
-                        -(b.dh_rxn_mol[i] / b.gas_const()) *
+                        -(b.dh_rxn_mol[i] / b.gas_const) *
                         (b.temperature ** -1 - 1 / 298.15))
             else:
                 return log(b.k_eq[i]) - log(10) == (
-                        -(b.dh_rxn_mol[i] / b.gas_const()) *
+                        -(b.dh_rxn_mol[i] / b.gas_const) *
                         (b.temperature ** -1 - 1 / 298.15))
 
         try:
@@ -636,37 +620,6 @@ class PropertyBlockData(PropertyBlockDataBase):
             self.del_component(self.k_eq)
             self.del_component(self.vant_hoff)
             raise
-
-    def _diffus(self):
-        # Diffusion tests
-        self.diffus = Var(self.phase_list,
-                          self.component_list,
-                          domain=Reals,
-                          doc="Diffusion coefficient [m^2/s]")
-        self.diffus.fix(1e-2)
-
-    def _therm_cond(self):
-        self.therm_cond = Var(self.phase_list,
-                              domain=Reals,
-                              doc="Thermal conductivity [W/m.K]")
-        self.therm_cond.fix(10)
-
-    def _material_concentration_term(self):
-        self.material_concentration_term = Var(
-            self.phase_list,
-            self.component_list,
-            domain=Reals,
-            doc="Concentration for diffusion")
-
-        def material_concentration_calc(b, k, j):
-            return b.material_concentration_term[k, j] == (
-                    25 * b.mole_frac[j])
-
-        self.material_concentration_calc = Constraint(
-            self.phase_list,
-            self.component_list,
-            doc="Molar concentration calculation",
-            rule=material_concentration_calc)
 
     def _make_balance_terms(self):
         def material_balance_term(b, i, j):
@@ -698,7 +651,7 @@ class PropertyBlockData(PropertyBlockDataBase):
 
     def declare_port_members(b):
         members = {"flow_mol_comp": b.flow_mol_comp,
-                   "enth_mol": b.enth_mol,
+                   "temperature": b.temperature,
                    "pressure": b.pressure}
         return members
 
@@ -707,204 +660,159 @@ class PropertyBlockData(PropertyBlockDataBase):
         pass
 
 
-##############################################################################
-##############################################################################
-##############################################################################
-##############################################################################
-# Institute for the Design of Advanced Energy Systems Process Systems
-# Engineering Framework (IDAES PSE Framework) Copyright (c) 2018, by the
-# software owners: The Regents of the University of California, through
-# Lawrence Berkeley National Laboratory,  National Technology & Engineering
-# Solutions of Sandia, LLC, Carnegie Mellon University, West Virginia
-# University Research Corporation, et al. All rights reserved.
-#
-# Please see the files COPYRIGHT.txt and LICENSE.txt for full copyright and
-# license information, respectively. Both files are also available online
-# at the URL "https://github.com/IDAES/idaes".
-##############################################################################
-"""
-Demonstration and test flowsheet for a dynamic flowsheet.
-
-"""
-
-
-# Import Unit Model Modules
-@declare_process_block_class("Flowsheet")
-class _Flowsheet(FlowsheetBlockData):
-    """
-    Create the flowsheet class.  Contains all the unit models and
-    connections between them.  Also contains the main Pyomo model and
-    solver.
-    """
-
-    def build(self):
-        """
-        Make the flowsheet object, fix some variables, and solve the problem
-        """
-        # Call UnitModel.build to setup dynamics
-        super(_Flowsheet, self).build()
-
-        # Add property packages to flowsheet library
-        self.properties_rxn = PropertyParameterBlock()
-
-        # Create unit models
-        self.Tank = CSTR(property_package=self.properties_rxn)
-
-        # Add constraints to Tank
-        self.Tank.height = Var(self.Tank.time,
-                               initialize=0.68,
-                               doc="Depth of fluid in tank")
-        self.Tank.area = Var(initialize=1.0,
-                             doc="Cross-sectional area of tank")
-
-        @self.Tank.Constraint(self.Tank.time, doc="Tank geometry constraint")
-        def geometry(b, t):
-            return b.volume[t] == b.area * b.height[t]
-
-        self.Tank.volume_flow = Var(self.Tank.time,
-                                    initialize=154100.0,
-                                    doc="Volumetric flow leaving tank")
-
-        @self.Tank.Constraint(self.Tank.time, doc="Flow volume constraint")
-        def volume_flow_calculation(b, t):
-            return b.volume_flow[t] == (
-                    b.holdup.properties_out[t].flow_mol *
-                    b.holdup.properties_out[t].dens_mol_phase['Liq'])
-
-        self.Tank.flow_coeff = Var(self.Tank.time,
-                                   initialize=250000.0,
-                                   doc="Tank outlet flow coefficient")
-
-        @self.Tank.Constraint(self.Tank.time, doc="Outlet flow correlation")
-        def outlet_flowrate(b, t):
-            return b.volume_flow[t] == b.flow_coeff[t] * b.height[t]
-
-        # Transform time domain
-        discretizer = TransformationFactory('dae.finite_difference')
-        discretizer.apply_to(self,
-                             nfe=100,
-                             wrt=self.time,
-                             scheme='BACKWARD')
-
-        # Call post_transform_build (needed for now)
-        self.post_transform_build()
-
-        # Add Connections
-
-        # Expand connections
-        TransformationFactory('network.expand_arcs').apply_to(self)
-
-
-def build_model():
-    """
-    Construct flowsheet object
-    """
-    # Create a Concrete Model as the top level object
-    m = ConcreteModel()
-
-    # Creat flowsheet object and attach to Concrete Model
-    m.fs_obj = Flowsheet(dynamic=True, time_set=[0, 1.0, 10000.0])
-
-    return m
-
-
-def setInputs(m):
-    """
-    Set inlet and operating conditions, and some initial conditions.
-    """
-    # ---------------------------------------------------------------------
-    # Unit Tank
-    m.fs_obj.Tank.inlet[:].vars["flow_mol_comp"]["a"].fix(1.0)
-    m.fs_obj.Tank.inlet[:].vars["flow_mol_comp"]["b"].fix(2.0)
-    m.fs_obj.Tank.inlet[:].vars["flow_mol_comp"]["c"].fix(0.1)
-    m.fs_obj.Tank.inlet[:].vars["flow_mol_comp"]["d"].fix(0.0)
-    m.fs_obj.Tank.inlet[:].vars["flow_mol_comp"]["e"].fix(0.0)
-    m.fs_obj.Tank.inlet[:].vars["flow_mol_comp"]["f"].fix(0.0)
-    m.fs_obj.Tank.inlet[:].vars["enth_mol"].fix(-238.71)
-    m.fs_obj.Tank.inlet[:].vars["pressure"].fix(101325.0)
-
-    m.fs_obj.Tank.flow_coeff.fix(250000.0)
-    m.fs_obj.Tank.area.fix(1.0)
-    m.fs_obj.Tank.heat.fix(0.0)
-
-    # Initial Condition - Steady-State
-    m.fs_obj.Tank.holdup.material_accumulation[0, "Liq", "a"].fix(0.0)
-    m.fs_obj.Tank.holdup.material_accumulation[0, "Liq", "b"].fix(0.0)
-    m.fs_obj.Tank.holdup.material_accumulation[0, "Liq", "c"].fix(0.0)
-    m.fs_obj.Tank.holdup.material_accumulation[0, "Liq", "d"].fix(0.0)
-    m.fs_obj.Tank.holdup.material_accumulation[0, "Liq", "e"].fix(0.0)
-    m.fs_obj.Tank.holdup.material_accumulation[0, "Liq", "f"].fix(0.0)
-    m.fs_obj.Tank.holdup.energy_accumulation[0, "Liq"].fix(0.0)
-
-    # Give an initial value for volume to help initialization
-    m.fs_obj.Tank.volume = 0.68
-
-
-def initialize_model(m, solver, stee=False):
-    """
-    Set up and execute initializeation routine for model
-    """
-    # Initialize Units
-    m.fs_obj.Tank.initialize(outlvl=1)
-
-    # Solve flowsheet
-    results = solver.solve(m.fs_obj, tee=stee)
-
-    return results
-
-
-def simulation1(m, solver, stee=False):
-    # -------------------------------------------------------------------------
-    # Create a step change in feed
-    for t in m.fs_obj.time:
-        if t > 5.0:
-            # After time = 5.0, 50% increase in feed rate
-            m.fs_obj.Tank.inlet[t].vars["flow_mol_comp"]["a"].fix(1.5)
-            m.fs_obj.Tank.inlet[t].vars["flow_mol_comp"]["b"].fix(3.0)
-            m.fs_obj.Tank.inlet[t].vars["flow_mol_comp"]["c"].fix(0.2)
-            m.fs_obj.Tank.inlet[t].vars["flow_mol_comp"]["d"].fix(0.0)
-            m.fs_obj.Tank.inlet[t].vars["flow_mol_comp"]["e"].fix(0.0)
-            m.fs_obj.Tank.inlet[t].vars["flow_mol_comp"]["f"].fix(0.0)
-            m.fs_obj.Tank.inlet[t].vars["enth_mol"].fix(-358.065)
-
-    # -------------------------------------------------------------------------
-    # Solve flowsheet
-    results = solver.solve(m, tee=stee)
-
-    return results
-
-
-def print_summary(fs_obj):
-    """
-    Print some key results from the model.
-    """
-    print()
-    print("Results")
-    print()
-    print("Tank")
-    fs_obj.Tank.outlet.display()
-    fs_obj.Tank.height.display()
-    fs_obj.Tank.volume_flow.display()
-
-
-def gen_mod_tank():
+def gen_mod_():
     """
     Make the flowsheet object, fix some variables, and solve the problem
     """
     # Create a Concrete Model as the top level object
-    m = build_model()
+    m = ConcreteModel()
 
-    # Fix variables
-    setInputs(m)
+    # Add a flowsheet object to the model
+    m.fs = FlowsheetBlock(dynamic=True,
+                          time_set=[0, 1, 500000])
+
+    # Add property packages to flowsheet library
+    m.fs.properties_rxn = PropertyParameterBlock()
+    m.fs.config.default_property_package = m.fs.properties_rxn
+
+    # Create unit models
+    m.fs.Mix = Mixer(dynamic=False)
+    m.fs.Tank1 = CSTR()
+    m.fs.Tank2 = CSTR()
+
+    # Add constraints to Tank1
+    m.fs.Tank1.height = Var(m.fs.Tank1.time,
+                            initialize=1.0,
+                            doc="Depth of fluid in tank [m]")
+    m.fs.Tank1.area = Var(initialize=1.0,
+                          doc="Cross-sectional area of tank [m^2]")
+    m.fs.Tank1.volume_flow = Var(m.fs.Tank1.time,
+                                 initialize=4.2e5,
+                                 doc="Volumetric flow leaving tank")
+    m.fs.Tank1.flow_coeff = Var(m.fs.Tank1.time,
+                                initialize=5e-5,
+                                doc="Tank outlet flow coefficient")
+
+    def geometry(b, t):
+        return b.volume[t] == b.area * b.height[t]
+
+    m.fs.Tank1.geometry = Constraint(m.fs.Tank1.time, rule=geometry)
+
+    def volume_flow_calculation(b, t):
+        return b.volume_flow[t] == (
+                b.holdup.properties_out[t].flow_mol /
+                b.holdup.properties_out[t].dens_mol_phase['Liq'])
+
+    m.fs.Tank1.volume_flow_calculation = Constraint(
+        m.fs.Tank1.time,
+        rule=volume_flow_calculation)
+
+    def outlet_flowrate(b, t):
+        return b.volume_flow[t] == b.flow_coeff[t] * b.height[t]
+
+    m.fs.Tank1.outlet_flowrate = Constraint(m.fs.Tank1.time,
+                                            rule=outlet_flowrate)
+
+    # Add constraints to Tank2
+    m.fs.Tank2.height = Var(m.fs.Tank2.time,
+                            initialize=1.0,
+                            doc="Depth of fluid in tank [m]")
+    m.fs.Tank2.area = Var(initialize=1.0,
+                          doc="Cross-sectional area of tank [m^2]")
+    m.fs.Tank2.volume_flow = Var(m.fs.Tank2.time,
+                                 initialize=4.2e5,
+                                 doc="Volumetric flow leaving tank")
+    m.fs.Tank2.flow_coeff = Var(m.fs.Tank2.time,
+                                initialize=5e-5,
+                                doc="Tank outlet flow coefficient")
+
+    m.fs.Tank2.geometry = Constraint(m.fs.Tank2.time, rule=geometry)
+    m.fs.Tank2.volume_flow_calculation = Constraint(
+        m.fs.Tank2.time,
+        rule=volume_flow_calculation)
+    m.fs.Tank2.outlet_flowrate = Constraint(m.fs.Tank2.time,
+                                            rule=outlet_flowrate)
+
+    # Apply DAE Transformation
+    discretizer = TransformationFactory('dae.finite_difference')
+    discretizer.apply_to(m.fs,
+                         nfe=200,
+                         wrt=m.fs.time,
+                         scheme='BACKWARD')
+
+    # Post transform build
+    m.fs.post_transform_build()
+
+    # Make Streams
+    m.fs.stream_1 = Stream(source=m.fs.Mix.outlet,
+                           destination=m.fs.Tank1.inlet)
+
+    m.fs.stream_2 = Stream(source=m.fs.Tank1.outlet,
+                           destination=m.fs.Tank2.inlet)
+
+    # Set inlet and operating conditions, and some initial conditions.
+    m.fs.Mix.inlet[:, "1"].vars["flow_mol_comp"]["a"].fix(10.0)
+    m.fs.Mix.inlet[:, "1"].vars["flow_mol_comp"]["b"].fix(0.0)
+    m.fs.Mix.inlet[:, "1"].vars["flow_mol_comp"]["c"].fix(1.0)
+    m.fs.Mix.inlet[:, "1"].vars["flow_mol_comp"]["d"].fix(0.0)
+    m.fs.Mix.inlet[:, "1"].vars["flow_mol_comp"]["e"].fix(0.0)
+    m.fs.Mix.inlet[:, "1"].vars["flow_mol_comp"]["f"].fix(0.0)
+    m.fs.Mix.inlet[:, "1"].vars["temperature"].fix(303.15)
+    m.fs.Mix.inlet[:, "1"].vars["pressure"].fix(101325.0)
+
+    m.fs.Mix.inlet[:, "2"].vars["flow_mol_comp"]["a"].fix(0.0)
+    m.fs.Mix.inlet[:, "2"].vars["flow_mol_comp"]["b"].fix(20.0)
+    m.fs.Mix.inlet[:, "2"].vars["flow_mol_comp"]["c"].fix(0.0)
+    m.fs.Mix.inlet[:, "2"].vars["flow_mol_comp"]["d"].fix(0.0)
+    m.fs.Mix.inlet[:, "2"].vars["flow_mol_comp"]["e"].fix(0.0)
+    m.fs.Mix.inlet[:, "2"].vars["flow_mol_comp"]["f"].fix(0.0)
+    m.fs.Mix.inlet[:, "2"].vars["temperature"].fix(303.15)
+    m.fs.Mix.inlet[:, "2"].vars["pressure"].fix(101325.0)
+
+    m.fs.Tank1.area.fix(0.5)
+    m.fs.Tank1.flow_coeff.fix(5e-6)
+    m.fs.Tank1.heat.fix(0.0)
+
+    m.fs.Tank2.area.fix(0.5)
+    m.fs.Tank2.flow_coeff.fix(5e-6)
+    m.fs.Tank2.heat.fix(0.0)
+
+    # Set Initial Conditions
+    m.fs.fix_initial_conditions('steady-state')
+
+    # Initialize Units
+    m.fs.Mix.initialize()
+    m.fs.Tank1.initialize(state_args={
+        "flow_mol_comp": {
+            "a": m.fs.Mix.outlet[0].vars["flow_mol_comp"]["a"].value,
+            "b": m.fs.Mix.outlet[0].vars["flow_mol_comp"]["b"].value,
+            "c": m.fs.Mix.outlet[0].vars["flow_mol_comp"]["c"].value,
+            "d": m.fs.Mix.outlet[0].vars["flow_mol_comp"]["d"].value,
+            "e": m.fs.Mix.outlet[0].vars["flow_mol_comp"]["e"].value,
+            "f": m.fs.Mix.outlet[0].vars["flow_mol_comp"]["f"].value},
+        "pressure": m.fs.Tank1.outlet[0].vars["pressure"].value,
+        "temperature": m.fs.Tank1.outlet[0].vars["temperature"].value})
+    m.fs.Tank2.initialize(state_args={
+        "flow_mol_comp": {
+            "a": m.fs.Tank1.outlet[0].vars["flow_mol_comp"]["a"].value,
+            "b": m.fs.Tank1.outlet[0].vars["flow_mol_comp"]["b"].value,
+            "c": m.fs.Tank1.outlet[0].vars["flow_mol_comp"]["c"].value,
+            "d": m.fs.Tank1.outlet[0].vars["flow_mol_comp"]["d"].value,
+            "e": m.fs.Tank1.outlet[0].vars["flow_mol_comp"]["e"].value,
+            "f": m.fs.Tank1.outlet[0].vars["flow_mol_comp"]["f"].value},
+        "pressure": m.fs.Tank1.outlet[0].vars["pressure"].value,
+        "temperature": m.fs.Tank1.outlet[0].vars["temperature"].value})
 
     # Create a solver
-    stee = True
-    opt = SolverFactory('ipopt')
-    opt.options = {'tol': 1e-6,
-                   'mu_init': 1e-8,
-                   'bound_push': 1e-8}
+    solver = SolverFactory('ipopt')
+    results = solver.solve(m, tee=True)
 
-    m.fs_obj.model_check()
-    initialize_model(m, opt, stee)
-    results = simulation1(m, opt, stee)
+    # Create a disturbance
+    for t in m.fs.time:
+        if t >= 1.0:
+            m.fs.Mix.inlet[t, "2"].vars["flow_mol_comp"]["b"].fix(10.0)
+
+    results = solver.solve(m, tee=True)
+
+    # For testing purposes
     return m
