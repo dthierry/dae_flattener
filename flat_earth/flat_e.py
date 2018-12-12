@@ -3,7 +3,6 @@ from __future__ import division
 from __future__ import print_function
 
 import operator
-import sys
 
 import six
 from pyomo.core.expr import current as EXPR
@@ -99,6 +98,8 @@ class Flattener(object):
         cpc = comp.parent_component()
         #:
         if cpc.is_indexed():
+            tmp_s = None
+            tmp_t = None
             tmp_s, tmp_t = self.assess_set(comp, time_set)
             if isinstance(tmp_s, tuple):
                 for i in tmp_s:
@@ -111,8 +112,9 @@ class Flattener(object):
             return namel
         else:
             namel = self._navigate_structure2(cpb, s_l, time_set)
-            if isinstance(comp, pyomo.core.base.var._GeneralVarData) or isinstance(comp, pyomo.core.base.var.SimpleVar):
-                namel.append(cpc.local_name)
+            # if isinstance(comp, pyomo.core.base.var._GeneralVarData) or isinstance(comp, pyomo.core.base.var.SimpleVar):
+            if not comp.is_indexed():
+                namel.append(cpc.local_name)  #: these are generally not hashable.
             else:
                 namel.append(cpc)
             return namel
@@ -121,6 +123,8 @@ class Flattener(object):
         if not isinstance(soi, pyomo.core.base.sets.Set):
             raise TypeError('this not a Set')
         cpc = comp.parent_component()
+        if cpc is comp:  #: this doesn't have a set
+            return None, None
         if cpc.is_indexed():  #: if the parent component is indexed I want the current index.
             idx0 = comp.index()
             if cpc.index_set().dimen > 1:  #: Multi-set
@@ -144,7 +148,7 @@ class Flattener(object):
                 else:
                     return comp.index(), None
         else:
-            return
+            return None, None
 
     def _current_time_index(self, comp, time_set):
         # type: (pyomo.core.base.component.Component, pyomo.core.base.sets.Set) -> float
@@ -160,7 +164,7 @@ class Flattener(object):
         if cpb is None:  #: at the root
             return None
         else:
-            if cpc.is_indexed():  #: if the parent component is indexed I want the current index.
+            if cpc.is_indexed() and (not cpc is comp):  #: if the parent component is indexed I want the current index.
                 idx0 = comp.index()
                 if cpc.index_set().dimen > 1:  #: Multi-set
                     if time_set in cpc._implicit_subsets:  #: time is in the set
@@ -200,8 +204,10 @@ class Flattener(object):
     def _replacement_alg(self):
         n = self.n_mod
         count = 0
+        j = -1
         visitor = ReplacementVisitor(self.rev_flat_dict, self.idx_fun)
         for i in self.o_mod.component_data_objects(Constraint):
+            j += 1
             if not isinstance(i, pyomo.core.base.constraint.SimpleConstraint):
                 if i.parent_component() in self.deqns:
                     continue
@@ -209,22 +215,24 @@ class Flattener(object):
             n_e = visitor.dfs_postorder_stack(o_e)
             n.add_component('c' + str(count), Constraint(expr=n_e))
             count += 1
-
-        j = 0
-        for i in self.deqns_dict.keys():
-            # d = self.deqns_dict[i]
-            localname = 'dx_disc_eq' + str(j)
-            n.add_component(localname, ConstraintList())
-            ncl = getattr(n, localname)
-            for e in six.itervalues(self.deqns_dict[i]):
-                o_e = e.expr
-                n_e = visitor.dfs_postorder_stack(o_e)
-                ncl.add(n_e)
-                # self.flat_dict['x' + str(j), t] = entry  #: flat to var dict
-                # self.rev_flat_dict[i, t] = nvar[t]
-            j += 1
-        print("[[FLATH_EARTH]] Created model with {} variables out of which {} are not indexed."
-              .format(j, self.n_not_indexed_vars))
+        print("[[FLATH_EARTH]] Created model with:\n"
+              "\t{} replaced out of {} equations."
+              .format(count, j))
+        # j = 0
+        # for i in self.deqns_dict.keys():
+        #     # d = self.deqns_dict[i]
+        #     localname = 'dx_disc_eq' + str(j)
+        #     n.add_component(localname, ConstraintList())
+        #     ncl = getattr(n, localname)
+        #     for e in six.itervalues(self.deqns_dict[i]):
+        #         o_e = e.expr
+        #         n_e = visitor.dfs_postorder_stack(o_e)
+        #         ncl.add(n_e)
+        #         # self.flat_dict['x' + str(j), t] = entry  #: flat to var dict
+        #         # self.rev_flat_dict[i, t] = nvar[t]
+        #     j += 1
+        # print("[[FLATH_EARTH]] Created model with {} variables out of which {} are not indexed."
+        #       .format(j, self.n_not_indexed_vars))
 
 
     def _classification_dict(self):
@@ -276,12 +284,13 @@ class Flattener(object):
                         self.deqns_dict[s0, s1] = dict()
                 d = self.deqns_dict[s0, s1]  #: dict to dict
                 d[time] = i  #: pyomo var
+
         print("[[FLATH_EARTH]] {} deqn out of which {} are not indexed.".format(len(self.deqns), len(self.deqns_dict)))
 
     def _create_variables(self):
         self.rev_flat_dict = dict()
         n = self.n_mod
-
+        count = 0
         j = 0
         j0 = 0
         jz = 0
@@ -303,13 +312,11 @@ class Flattener(object):
                 self.n_not_indexed_vars += 1
                 self.rev_flat_dict[i, -1] = nvar
                 continue
-
             #: need to skip both dterms and dstates
-            d = self.state_dict[i]
             dummy = None
             for dummy in six.itervalues(d):
                 break  #: get one value
-            #: theorem: differential state variable has got to be indexed by time
+            #: theorem: differential state variable has got to be indexed by time (i.e. not SimpleVar)
             if not isinstance(dummy, pyomo.core.base.var.SimpleVar):
                 if dummy.parent_component() in self.dterm:  #: skip ddt terms
                     continue
@@ -321,12 +328,15 @@ class Flattener(object):
                     n.add_component(localdzname, DerivativeVar(dzvar))
                     jz += 1
                     continue
+            #: non-differential variables might be indirectly indexed by time.
             localname = 'x' + str(j)
             n.add_component(localname, Var(n.time))
             j += 1
+
         tfs = None
         scheme = None
-        if self.o_di['scheme'] == 'BACKWARD Difference':
+        ncp = None
+        if self.o_di['scheme'] == 'BACKWARD Difference':  #: I ha'e this
             tfs = 'dae.finite_difference'
             scheme = 'BACKWARD'
         elif self.o_di['scheme'] == 'LAGRANGE-RADAU':
@@ -336,23 +346,64 @@ class Flattener(object):
             tfs = 'dae.collocation'
             scheme = 'LAGRANGE-LEGENDRE'
 
-        d = TransformationFactory(tfs)
-        ncp = None
-        if self.o_di.has_key('ncp'):
-            ncp = self.o_di.has_key('ncp')
+        d = TransformationFactory(tfs)  #: discretize to generate the disc_eqns
+
+        if 'ncp' in self.o_di.keys():
+            ncp = self.o_di['ncp']
         d.apply_to(n, scheme=scheme, ncp=ncp)
-        n.pprint(filename='tudun')
-        self.o_mod.pprint(filename='dududun')
-        sys.exit()
+
+        for k in n.time.get_discretization_info().keys():
+            if n.time.get_discretization_info()[k] != self.o_di[k]:
+                raise Exception(k)
         j = 0
+        jz = 0
         for i in self.state_dict.keys():
             d = self.state_dict[i]
             if not isinstance(d, dict):
-                continue
+                continue  #: already done.
 
+            dummy = None
+            for dummy in six.itervalues(d):
+                break  #: get one value
+            #: theorem: differential state variable has got to be indexed by time (i.e. not SimpleVar)
+            if not isinstance(dummy, pyomo.core.base.var.SimpleVar):  #: need to do this to keep the linking
+                if dummy.parent_component() in self.dterm:  #: skip ddt terms
+                    localname = 'z' + str(jz)
+                    localdzname = 'dz' + str(jz) + 'dt'
+                    dzvar = getattr(n, localname)
+                    dztermvar = getattr(n, localdzname)
+                    tv = dummy.parent_component().get_state_var()
+                    for dtv in six.itervalues(tv):
+                        pass
+                        break
+                    s0, s1, time = self.idx_fun(dtv)  #: this part is tricky :S
+                    o_ddz = self.state_dict[i[0], s1]  #: original_diff_state :S
+                    for t in n.time:
+                        entry = d[t]
+                        entrydz = o_ddz[t]
+                        dztermvar[t].setlb(entry.lb)
+                        dztermvar[t].setub(entry.ub)
+                        dztermvar[t].set_value(value(entry))
+                        if entry.is_fixed():
+                            dztermvar[t].fix()
+
+                        dzvar[t].setlb(entrydz.lb)
+                        dzvar[t].setub(entrydz.ub)
+                        dzvar[t].set_value(value(entrydz))
+                        if entrydz.is_fixed():
+                            dzvar[t].fix()
+
+                        self.flat_dict[localname, t] = entry  #: flat to var dict
+                        self.flat_dict[localdzname, t] = entrydz  #: flat to var dict
+                        self.rev_flat_dict[i, t] = dztermvar[t]
+                        self.rev_flat_dict[(i[0], s1), t] = dzvar[t]
+                        count += 1
+                    jz += 1
+                    continue
+                if dummy.parent_component() in self.dstate:  #: skip diff states
+                    continue
             localname = 'x' + str(j)
-            n.add_component(localname, Var(n.time))
-            nvar = getattr(n, localname)
+            nvar = getattr(n, localname)  #: Give these variables an identity
             for t in n.time:
                 entry = d[t]
                 nvar[t].setlb(entry.lb)
@@ -362,10 +413,12 @@ class Flattener(object):
                     nvar[t].fix()
                 self.flat_dict['x' + str(j), t] = entry  #: flat to var dict
                 self.rev_flat_dict[i, t] = nvar[t]
+                count += 1
             j += 1
-
-        print("[[FLATH_EARTH]] Created model with {} algebraic variables out of which {} are not indexed."
-              .format(j, self.n_not_indexed_vars))
+        count += self.n_not_indexed_vars
+        print("[[FLATH_EARTH]] Created model with:\n"
+              "\t{} algebraic variables\n\t{} differential variables\n\t{} not indexed. {} overall"
+              .format(j, jz, self.n_not_indexed_vars, count))
 
     def idx_fun(self, comp):
         sl = []
